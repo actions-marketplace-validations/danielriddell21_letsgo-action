@@ -1,4 +1,4 @@
-name: letsgo
+name: letsgo release
 description: Build, verify and publish a Go release reproducibly.
 author: danielriddell21
 
