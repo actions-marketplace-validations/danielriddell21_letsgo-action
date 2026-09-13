@@ -1,0 +1,145 @@
+name: letsgo
+description: Build, verify and publish a Go release reproducibly.
+author: danielriddell21
+
+branding:
+  icon: package
+  color: blue
+
+inputs:
+  version:
+    description: >-
+      The letsgo release to install, as a tag such as v0.3.0, or "latest".
+      Pinned by default: letsgo decides the archive layout and the linker
+      flags, so it is a build input, and a release built by a version you did
+      not choose is a release you cannot reproduce.
+    required: false
+    default: v0.3.0
+
+  command:
+    description: >-
+      The letsgo command to run: release, plan, build, verify, diff, tag or
+      yank. Leave empty to install letsgo and run nothing.
+    required: false
+    default: release
+
+  args:
+    description: Extra arguments appended to the command, split on whitespace.
+    required: false
+    default: ""
+
+  working-directory:
+    description: The directory to run in.
+    required: false
+    default: .
+
+  token:
+    description: >-
+      The forge token letsgo publishes with. The default workflow token is
+      enough for releases in this repository; a Homebrew tap in another
+      repository needs a PAT or an App token.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  letsgo-version:
+    description: The letsgo version that ran.
+    value: ${{ steps.install.outputs.version }}
+
+  version:
+    description: The project version that was built or published, without a leading "v".
+    value: ${{ steps.run.outputs.version }}
+
+  release-url:
+    description: The release page, when a release was published.
+    value: ${{ steps.run.outputs.release-url }}
+
+  manifest:
+    description: Path to the release manifest letsgo wrote, when it wrote one.
+    value: ${{ steps.run.outputs.manifest }}
+
+runs:
+  using: composite
+
+  steps:
+    # Go is a prerequisite rather than something this installs: the version
+    # matters to the output, so choosing it belongs to the workflow that knows
+    # which one the project releases with.
+    - name: Check for Go
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v go >/dev/null 2>&1; then
+          echo "::error::letsgo needs Go on the runner. Add actions/setup-go before this step." >&2
+          exit 1
+        fi
+        echo "using $(go version)"
+
+    - name: Install letsgo
+      id: install
+      shell: bash
+      env:
+        # Inputs reach the script as environment variables, never as ${{ }}
+        # inside it: an interpolated input is a shell injection waiting for
+        # someone to name a branch after one.
+        LETSGO_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! "$LETSGO_VERSION" =~ ^(latest|v[0-9]+\.[0-9]+\.[0-9]+([-+].*)?)$ ]]; then
+          echo "::error::version must be \"latest\" or a tag such as v0.3.0, got \"$LETSGO_VERSION\"" >&2
+          exit 1
+        fi
+
+        # go install, rather than downloading a binary: the module proxy
+        # checks what it fetches against the public checksum database, which
+        # is a stronger guarantee than any digest this action could carry, and
+        # it works on every runner without a platform matrix.
+        GOFLAGS=-mod=mod go install "github.com/danielriddell21/letsgo/cmd/letsgo@${LETSGO_VERSION}"
+
+        bin="$(go env GOPATH)/bin"
+        echo "$bin" >> "$GITHUB_PATH"
+
+        installed="$("$bin/letsgo" version)"
+        echo "version=${installed#letsgo }" >> "$GITHUB_OUTPUT"
+        echo "$installed"
+
+    - name: Run letsgo
+      id: run
+      if: inputs.command != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        LETSGO_COMMAND: ${{ inputs.command }}
+        LETSGO_ARGS: ${{ inputs.args }}
+        LETSGO_REPOSITORY: ${{ github.repository }}
+        LETSGO_SERVER: ${{ github.server_url }}
+      run: |
+        set -euo pipefail
+
+        # Deliberately unquoted: args is a whitespace-separated list, which is
+        # the only shape an action input can carry.
+        # shellcheck disable=SC2086
+        letsgo "$LETSGO_COMMAND" $LETSGO_ARGS
+
+        # Outputs come from the manifest rather than from parsing stdout: it is
+        # the file letsgo writes precisely so that machines do not have to read
+        # the part meant for people.
+        # head rather than -quit: BSD find and GNU find disagree about the
+        # latter, and this runs on whichever the runner has.
+        manifest="$(find . -maxdepth 3 -name letsgo.json 2>/dev/null | head -n 1 || true)"
+        if [[ -z "$manifest" ]]; then
+          exit 0
+        fi
+
+        version="$(jq -r '.version' "$manifest")"
+        tag="$(jq -r '.tag // ""' "$manifest")"
+
+        {
+          echo "manifest=$manifest"
+          echo "version=$version"
+          if [[ -n "$tag" ]]; then
+            echo "release-url=${LETSGO_SERVER}/${LETSGO_REPOSITORY}/releases/tag/${tag}"
+          fi
+        } >> "$GITHUB_OUTPUT"
