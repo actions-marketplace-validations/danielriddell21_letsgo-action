@@ -9,12 +9,13 @@ branding:
 inputs:
   version:
     description: >-
-      The letsgo release to install, as a tag such as v0.3.0, or "latest".
-      Pinned by default: letsgo decides the archive layout and the linker
-      flags, so it is a build input, and a release built by a version you did
-      not choose is a release you cannot reproduce.
+      The letsgo release to install, as a tag such as v0.8.0, or "latest".
+      Defaults to "latest", so that this action does not need a release of
+      its own every time letsgo publishes one. Pin it to a tag when the
+      release has to be reproducible: letsgo decides the archive layout and
+      the linker flags, so it is a build input exactly as the compiler is.
     required: false
-    default: v0.3.0
+    default: latest
 
   command:
     description: >-
@@ -36,10 +37,28 @@ inputs:
   token:
     description: >-
       The forge token letsgo publishes with. The default workflow token is
-      enough for releases in this repository; a Homebrew tap in another
-      repository needs a PAT or an App token.
+      enough for releases in this repository, and is what a release should
+      use: it is minted for the run, expires with it, and its permissions are
+      declared in the workflow. A Homebrew tap lives in another repository,
+      which a workflow token cannot write to at all — that is tap-token's job,
+      not this one's.
     required: false
     default: ${{ github.token }}
+
+  tap-token:
+    description: >-
+      The token the Homebrew formula is published with, for a repository whose
+      letsgo.mod carries a brew directive. An App token scoped to the tap
+      alone, so that the credential which can write to another repository is
+      not also one that can write to this one — and so the App needs no
+      installation on the repository being released.
+
+      Empty falls back to token, which is the single-credential arrangement
+      every repository used before the two could be told apart. It still
+      works; it costs a tap token that can also rewrite this repository's
+      releases.
+    required: false
+    default: ""
 
 outputs:
   letsgo-version:
@@ -87,7 +106,7 @@ runs:
         set -euo pipefail
 
         if [[ ! "$LETSGO_VERSION" =~ ^(latest|v[0-9]+\.[0-9]+\.[0-9]+([-+].*)?)$ ]]; then
-          echo "::error::version must be \"latest\" or a tag such as v0.3.0, got \"$LETSGO_VERSION\"" >&2
+          echo "::error::version must be \"latest\" or a tag such as v0.8.0, got \"$LETSGO_VERSION\"" >&2
           exit 1
         fi
 
@@ -111,6 +130,7 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
+        LETSGO_TAP_TOKEN: ${{ inputs.tap-token }}
         LETSGO_COMMAND: ${{ inputs.command }}
         LETSGO_ARGS: ${{ inputs.args }}
         LETSGO_REPOSITORY: ${{ github.repository }}
