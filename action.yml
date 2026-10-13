@@ -274,7 +274,7 @@ runs:
     # reviewers have approved it.
     - name: Download plan
       if: inputs.command == 'apply' && inputs.args == ''
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: ${{ inputs.plan-artifact }}
         path: ${{ runner.temp }}/letsgo-plan
