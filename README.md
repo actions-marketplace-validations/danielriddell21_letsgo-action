@@ -34,7 +34,7 @@ jobs:
 
 Plugins pinned in `letsgo.mod` are installed before the command runs, so a
 workflow never names them. A cask is the `letsgo-cask` plugin pinned on the
-`tap-files` hook, with its settings in `letsgo-cask.mod`; for a tap, pass
+`tap-files` hook, with its settings in `.letsgo/cask.mod`; for a tap, pass
 `tap-app-id: ${{ vars.TAP_APP_ID }}` and
 `tap-app-private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}`.
 
