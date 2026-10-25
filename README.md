@@ -57,7 +57,7 @@ default.
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | `latest` | The letsgo release to install, a tag such as `v0.8.0`, or `local` to build `./cmd/letsgo` from the checkout. |
+| `version` | `latest` | The letsgo release to install, a tag such as `v1.0.0`, or `local` to build `./cmd/letsgo` from the checkout. |
 | `command` | `release` | `release`, `plan`, `apply`, `build`, `verify`, `diff`, `tag`, `promote`, `yank`, `audit`, `doctor`, `features`, or empty to install only. |
 | `args` | `""` | Extra arguments, split on whitespace. |
 | `working-directory` | `.` | Where to run. |
@@ -82,7 +82,9 @@ default.
 
 ## Pinning the letsgo version
 
-`latest` saves this action a release every time letsgo publishes one. But
+`latest` saves this action a release every time letsgo publishes one. It is
+the newest stable letsgo, and from v1.0.0 it stays on the v1 line: a future
+major would need a `/v2` module path before `latest` could reach it. But
 letsgo decides the archive layout and linker flags, so it is a build input like
 the compiler: a release that must come out the same next time pins it, and
 bumps the pin deliberately.
@@ -90,7 +92,7 @@ bumps the pin deliberately.
 ```yaml
       - uses: danielriddell21/letsgo-action@v1
         with:
-          version: v0.8.0
+          version: v1.0.0
 ```
 
 ## Permissions
