@@ -32,48 +32,42 @@ jobs:
       - uses: danielriddell21/letsgo-action@v1
 ```
 
-A shallow clone is fine. letsgo falls back to the GitHub compare API when the
-changelog needs history the runner does not have.
+Go is a prerequisite: its version changes the bytes you ship, so the workflow
+chooses it. letsgo is installed with `go install`, checked by the module proxy
+against the public checksum database. A shallow clone is fine.
 
-### Checking a pull request
+- **Plugins** pinned in `letsgo.mod` are installed before the command runs, and
+  the plugin store is cached, so a workflow never names them.
+- **A Homebrew tap** needs a token that can write to another repository. Pass
+  `tap-app-id` and `tap-app-private-key` to mint one scoped to the tap alone.
+- **`tag` and `promote`** create an annotated tag, so the action sets
+  letsgo-champ[bot] as the git identity unless the workflow already set one.
+  `promote` needs `fetch-depth: 0`.
 
-`plan` resolves and gates a release without building one, in about two seconds:
+`command` also runs `plan`, `apply`, `verify`, `promote`, `audit`, `doctor`,
+`tag`, `yank`, `diff` and `features`, with `args` appended as written; empty
+installs letsgo and runs nothing. The [GitHub Action wiki page][ga] covers an
+approval gate between `plan` and `apply`, verifying a release, monorepos,
+promoting a prerelease from the GitHub UI, and the reasoning behind each
+default.
 
-```yaml
-      - uses: danielriddell21/letsgo-action@v1
-        with:
-          command: plan
-          args: --explain
-```
-
-### Verifying a published release
-
-```yaml
-      - uses: danielriddell21/letsgo-action@v1
-        with:
-          command: verify
-          args: v1.3.0
-```
-
-### Installing letsgo without running it
-
-```yaml
-      - uses: danielriddell21/letsgo-action@v1
-        with:
-          command: ""
-      - run: letsgo plan && letsgo build
-```
+[ga]: https://github.com/danielriddell21/letsgo/wiki/GitHub-Action
 
 ## Inputs
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | `latest` | The letsgo release to install, or a tag such as `v0.8.0`. |
-| `command` | `release` | `release`, `plan`, `build`, `verify`, `diff`, `tag`, `yank`, or empty to install only. |
+| `version` | `latest` | The letsgo release to install, a tag such as `v1.0.0`, or `local` to build `./cmd/letsgo` from the checkout. |
+| `command` | `release` | `release`, `plan`, `apply`, `build`, `verify`, `diff`, `tag`, `promote`, `yank`, `audit`, `doctor`, `features`, or empty to install only. |
 | `args` | `""` | Extra arguments, split on whitespace. |
 | `working-directory` | `.` | Where to run. |
+| `plan-file` | `release.plan` | Where `plan` saves the plan and `apply` reads it, relative to `working-directory`. |
+| `plan-artifact` | `release.plan` | The artifact name `plan` uploads the plan under and `apply` downloads it from. |
 | `token` | `github.token` | The forge token letsgo publishes with. |
 | `tap-token` | `""` | The token a Homebrew formula is published with. Empty falls back to `token`. |
+| `tap-app-id` / `tap-app-private-key` | `""` | A GitHub App that can write to the tap. Mints a token scoped to the tap alone and uses it as `tap-token`. |
+| `tap-repository` | `homebrew-tap` | The tap the App token is scoped to. |
+| `attest` | `false` | Attest provenance for the `dist/` archives. Needs `id-token: write` and `attestations: write`. |
 
 ## Outputs
 
@@ -83,73 +77,27 @@ changelog needs history the runner does not have.
 | `version` | The project version that was built or published. |
 | `release-url` | The release page, when a release was published. |
 | `manifest` | Path to the `letsgo.json` letsgo wrote. |
-
-```yaml
-      - uses: danielriddell21/letsgo-action@v1
-        id: release
-      - run: echo "published ${{ steps.release.outputs.release-url }}"
-```
+| `plan-file` | Path to the plan `plan` saved. |
+| `tag` | The release's tag, with the module directory prefix for a nested module (`services/api/v1.2.3`). |
 
 ## Pinning the letsgo version
 
-The default is `latest`, because the alternative was a release of this action
-every time letsgo published one — and an action whose only change is a version
-number teaches everyone to ignore its releases.
-
-That default is a convenience, not a guarantee. letsgo decides the archive
-layout and the linker flags, so it is a build input exactly as the compiler is,
-and a release built by a version you did not choose is a release you cannot
-reproduce. A repository that cares about that pins the tag:
+`latest` saves this action a release every time letsgo publishes one. It is
+the newest stable letsgo, and from v1.0.0 it stays on the v1 line: a future
+major would need a `/v2` module path before `latest` could reach it. But
+letsgo decides the archive layout and linker flags, so it is a build input like
+the compiler: a release that must come out the same next time pins it, and
+bumps the pin deliberately.
 
 ```yaml
       - uses: danielriddell21/letsgo-action@v1
         with:
-          version: v0.8.0
+          version: v1.0.0
 ```
-
-Bump that pin deliberately. `letsgo verify` replays a release from the manifest,
-which records the version that built it, so a release stays checkable either
-way — pinning is what makes the *next* one come out the same.
-
-## How letsgo is installed
-
-`go install github.com/danielriddell21/letsgo/cmd/letsgo@<version>`.
-
-The module proxy checks what it fetches against the public checksum database,
-which is a stronger guarantee than any digest this action could carry, and it
-works on every runner without a platform matrix. The cost is a short compile;
-letsgo has no dependencies, so it is short.
-
-Go itself is a prerequisite rather than something this action installs: the Go
-version changes the bytes of the binaries you ship, so choosing it belongs to
-the workflow that knows which one your project releases with.
 
 ## Permissions
 
-`contents: write` is the only one a plain release needs. Add `id-token` and
-`attestations` for build provenance, and `packages: write` for a container
-image.
-
-A Homebrew tap lives in another repository, and the workflow token cannot write
-to one. That needs an App token, passed as `tap-token` rather than as `token`:
-
-```yaml
-- uses: actions/create-github-app-token@v3
-  id: tap-token
-  with:
-    app-id: ${{ vars.TAP_APP_ID }}
-    private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
-    owner: ${{ github.repository_owner }}
-    repositories: homebrew-tap
-
-- uses: danielriddell21/letsgo-action@v1
-  with:
-    tap-token: ${{ steps.tap-token.outputs.token }}
-```
-
-Note what `repositories` does *not* list: the repository being released. Its
-own release is published with the workflow token, so the App needs no
-installation there — which also means a new repository cannot fail its first
-release for having been left out of one. Passing the App token as `token`
-instead works, and makes it a credential that can rewrite this repository's
-releases too.
+`contents: write` is all a plain release needs. Add `id-token: write` and
+`attestations: write` for provenance, and `packages: write` for a container
+image. The tap App needs installing only on the tap, not on the repository
+being released.

@@ -9,18 +9,26 @@ branding:
 inputs:
   version:
     description: >-
-      The letsgo release to install, as a tag such as v0.8.0, or "latest".
+      The letsgo release to install, as a tag such as v1.0.0, or "latest".
       Defaults to "latest", so that this action does not need a release of
       its own every time letsgo publishes one. Pin it to a tag when the
       release has to be reproducible: letsgo decides the archive layout and
       the linker flags, so it is a build input exactly as the compiler is.
+
+      "local" builds ./cmd/letsgo from the checkout in working-directory
+      instead, for letsgo releasing itself with the source being released.
     required: false
     default: latest
 
   command:
     description: >-
-      The letsgo command to run: release, plan, build, verify, diff, tag or
-      yank. Leave empty to install letsgo and run nothing.
+      The letsgo command to run: release, plan, apply, build, verify, diff,
+      tag, promote, yank, audit, doctor or features. Leave empty to install
+      letsgo and run nothing.
+
+      plan with no args saves the plan to plan-file, uploads it as the
+      plan-artifact artifact and writes it to the job summary. apply with no
+      args downloads that artifact and applies it.
     required: false
     default: release
 
@@ -33,6 +41,20 @@ inputs:
     description: The directory to run in.
     required: false
     default: .
+
+  plan-file:
+    description: >-
+      The file a saved plan is written to (plan) and read from (apply),
+      relative to working-directory.
+    required: false
+    default: release.plan
+
+  plan-artifact:
+    description: >-
+      The name the saved plan is uploaded under by plan, and downloaded from
+      by apply. Apply downloads it only when no args are given.
+    required: false
+    default: release.plan
 
   token:
     description: >-
@@ -60,6 +82,34 @@ inputs:
     required: false
     default: ""
 
+  tap-app-id:
+    description: >-
+      ID of the GitHub App that can write to the Homebrew tap. With
+      tap-app-private-key, mints an App token scoped to the tap alone and
+      uses it as tap-token. Pass vars.TAP_APP_ID.
+    required: false
+    default: ""
+
+  tap-app-private-key:
+    description: >-
+      Private key of the App named by tap-app-id. Empty mints nothing, and
+      tap-token is used as given.
+    required: false
+    default: ""
+
+  tap-repository:
+    description: The tap repository the App token is scoped to.
+    required: false
+    default: homebrew-tap
+
+  attest:
+    description: >-
+      Attest build provenance for the archives in dist/ after the command.
+      The calling job must grant id-token and attestations write, or the step
+      fails.
+    required: false
+    default: "false"
+
 outputs:
   letsgo-version:
     description: The letsgo version that ran.
@@ -76,6 +126,17 @@ outputs:
   manifest:
     description: Path to the release manifest letsgo wrote, when it wrote one.
     value: ${{ steps.run.outputs.manifest }}
+
+  plan-file:
+    description: Path to the plan letsgo saved, when command is plan and it saved one.
+    value: ${{ steps.run.outputs.plan-file }}
+
+  tag:
+    description: >-
+      The release's tag, including the module directory prefix for a module
+      nested in a monorepo (for example services/api/v1.2.3), when letsgo
+      wrote a manifest.
+    value: ${{ steps.run.outputs.tag }}
 
 runs:
   using: composite
@@ -102,11 +163,12 @@ runs:
         # inside it: an interpolated input is a shell injection waiting for
         # someone to name a branch after one.
         LETSGO_VERSION: ${{ inputs.version }}
+        LETSGO_DIR: ${{ inputs.working-directory }}
       run: |
         set -euo pipefail
 
-        if [[ ! "$LETSGO_VERSION" =~ ^(latest|v[0-9]+\.[0-9]+\.[0-9]+([-+].*)?)$ ]]; then
-          echo "::error::version must be \"latest\" or a tag such as v0.8.0, got \"$LETSGO_VERSION\"" >&2
+        if [[ ! "$LETSGO_VERSION" =~ ^(latest|local|v[0-9]+\.[0-9]+\.[0-9]+([-+].*)?)$ ]]; then
+          echo "::error::version must be \"latest\", \"local\" or a tag such as v1.0.0, got \"$LETSGO_VERSION\"" >&2
           exit 1
         fi
 
@@ -114,14 +176,108 @@ runs:
         # checks what it fetches against the public checksum database, which
         # is a stronger guarantee than any digest this action could carry, and
         # it works on every runner without a platform matrix.
-        GOFLAGS=-mod=mod go install "github.com/danielriddell21/letsgo/cmd/letsgo@${LETSGO_VERSION}"
+        if [[ "$LETSGO_VERSION" == local ]]; then
+          (cd "$LETSGO_DIR" && go install ./cmd/letsgo)
+        else
+          GOFLAGS=-mod=mod go install "github.com/danielriddell21/letsgo/cmd/letsgo@${LETSGO_VERSION}"
+        fi
 
         bin="$(go env GOPATH)/bin"
         echo "$bin" >> "$GITHUB_PATH"
 
-        installed="$("$bin/letsgo" version)"
-        echo "version=${installed#letsgo }" >> "$GITHUB_OUTPUT"
-        echo "$installed"
+        # version --json is the machine form; an older letsgo has only the
+        # text one, so fall back to reading that.
+        # An older letsgo ignores the flag and prints the text form, so what
+        # comes back has to parse before it is believed.
+        if installed="$("$bin/letsgo" version --json 2>/dev/null)" && installed="$(jq -er '.version' <<< "$installed" 2>/dev/null)"; then
+          :
+        else
+          installed="$("$bin/letsgo" version)"
+          installed="${installed#letsgo }"
+        fi
+        echo "version=$installed" >> "$GITHUB_OUTPUT"
+        echo "letsgo $installed"
+
+        # Where the plugin store is, as letsgo resolves it, so the cache
+        # below follows XDG_DATA_HOME and the global config. An older letsgo
+        # cannot say, and gets the default location for the platform.
+        if ! plugins="$("$bin/letsgo" plugin dir 2>/dev/null)" || [[ -z "$plugins" ]]; then
+          case "$RUNNER_OS" in
+            macOS) plugins="$HOME/Library/Application Support/letsgo/plugins" ;;
+            Windows) plugins="${LOCALAPPDATA:-$HOME/AppData/Local}/letsgo/plugins" ;;
+            *) plugins="${XDG_DATA_HOME:-$HOME/.local/share}/letsgo/plugins" ;;
+          esac
+        fi
+        echo "plugins=$plugins" >> "$GITHUB_OUTPUT"
+
+    # Keyed on letsgo.mod, the file that pins plugin versions: a runner whose
+    # pins haven't changed reuses installed plugins instead of rebuilding them
+    # from source on every run. The path is the one the installed letsgo
+    # reports, not a guess per platform.
+    - name: Cache plugin store
+      uses: actions/cache@v6
+      with:
+        path: ${{ steps.install.outputs.plugins }}
+        key: ${{ runner.os }}-letsgo-plugins-${{ hashFiles('**/letsgo.mod') }}
+        restore-keys: |
+          ${{ runner.os }}-letsgo-plugins-
+
+    # Every plugin letsgo.mod pins is installed here, so a workflow names none
+    # of them: the pin is the one place a plugin is chosen. letsgo checks each
+    # against its digest before running it, so this cannot change a release.
+    - name: Install pinned plugins
+      if: inputs.command != '' && hashFiles(format('{0}/letsgo.mod', inputs.working-directory)) != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        if ! pins="$(letsgo plugin list --json 2>/dev/null)"; then
+          echo "::warning::this letsgo cannot list its plugins; install them before this step"
+          exit 0
+        fi
+        jq -r '.plugins[]? | select(.ok | not) | "\(.command)@\(.version)"' <<< "$pins" |
+          while read -r plugin; do
+            letsgo plugin install "$plugin"
+          done
+
+    # A workflow token cannot write to another repository, so a tap needs an
+    # App token. It is scoped to the tap alone: the release itself is
+    # published with token, so the App need not be installed on this
+    # repository at all.
+    - name: Mint the tap token
+      id: app
+      if: inputs.tap-app-private-key != ''
+      uses: actions/create-github-app-token@v3
+      with:
+        app-id: ${{ inputs.tap-app-id }}
+        private-key: ${{ inputs.tap-app-private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ inputs.tap-repository }}
+
+    # tag and promote both create an annotated tag, which records a tagger.
+    # A runner has no git identity, so the tag is credited to letsgo-champ,
+    # the App every other release-time write already uses, unless the
+    # workflow chose an identity of its own.
+    - name: Set a git identity
+      if: inputs.command == 'tag' || inputs.command == 'promote'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        if ! git config user.email >/dev/null; then
+          git config user.name "letsgo-champ[bot]"
+          git config user.email "293666020+letsgo-champ[bot]@users.noreply.github.com"
+        fi
+
+    # The plan was made on another job, on purpose: the job that publishes is
+    # not the job that read the forge, and it runs only once the environment's
+    # reviewers have approved it.
+    - name: Download plan
+      if: inputs.command == 'apply' && inputs.args == ''
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.plan-artifact }}
+        path: ${{ runner.temp }}/letsgo-plan
 
     - name: Run letsgo
       id: run
@@ -130,25 +286,66 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
-        LETSGO_TAP_TOKEN: ${{ inputs.tap-token }}
+        LETSGO_TAP_TOKEN: ${{ steps.app.outputs.token || inputs.tap-token }}
         LETSGO_COMMAND: ${{ inputs.command }}
         LETSGO_ARGS: ${{ inputs.args }}
+        LETSGO_PLAN_FILE: ${{ inputs.plan-file }}
+        LETSGO_PLAN_DIR: ${{ runner.temp }}/letsgo-plan
         LETSGO_REPOSITORY: ${{ github.repository }}
         LETSGO_SERVER: ${{ github.server_url }}
       run: |
         set -euo pipefail
 
-        # Deliberately unquoted: args is a whitespace-separated list, which is
-        # the only shape an action input can carry.
-        # shellcheck disable=SC2086
-        letsgo "$LETSGO_COMMAND" $LETSGO_ARGS
+        # Split on whitespace, which is the only shape an action input can
+        # carry; read -a does not expand globs the way an unquoted word would.
+        read -r -a args <<< "$LETSGO_ARGS"
+
+        # A bare plan or apply is the approval pipeline: plan saves what it
+        # would do, apply does exactly that. Any args at all mean the workflow
+        # is running the command its own way, and nothing is added.
+        plan_file=""
+        if [[ ${#args[@]} -eq 0 ]]; then
+          case "$LETSGO_COMMAND" in
+            plan)
+              plan_file="$PWD/$LETSGO_PLAN_FILE"
+              args=(-out "$plan_file")
+              ;;
+            apply) args=("$LETSGO_PLAN_DIR/$(basename "$LETSGO_PLAN_FILE")") ;;
+          esac
+        fi
+
+        if [[ -n "$plan_file" ]]; then
+          # The plan is what the reviewer approves, so it goes in the summary
+          # whether or not the plan succeeded. letsgo renders the summary
+          # itself, on stdout; everything else it says stays on stderr, in the
+          # job log.
+          status=0
+          out="$(mktemp)"
+          letsgo plan --format md "${args[@]}" > "$out" || status=$?
+          if [[ -s "$out" ]]; then
+            cat "$out" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # A plan that fails its gates has no diff to render.
+            printf '## letsgo plan\n\nThe plan did not complete; see the job log.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ $status -ne 0 ]]; then
+            exit "$status"
+          fi
+          if [[ -f "$plan_file" ]]; then
+            echo "plan-file=$plan_file" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          letsgo "$LETSGO_COMMAND" "${args[@]}"
+        fi
 
         # Outputs come from the manifest rather than from parsing stdout: it is
         # the file letsgo writes precisely so that machines do not have to read
         # the part meant for people.
         # head rather than -quit: BSD find and GNU find disagree about the
         # latter, and this runs on whichever the runner has.
-        manifest="$(find . -maxdepth 3 -name letsgo.json 2>/dev/null | head -n 1 || true)"
+        # The newest one, so a stale manifest from an earlier run in the same
+        # checkout is not reported in place of the one just written.
+        manifest="$(find . -maxdepth 3 -name letsgo.json -exec ls -t {} + 2>/dev/null | head -n 1 || true)"
         if [[ -z "$manifest" ]]; then
           exit 0
         fi
@@ -160,6 +357,34 @@ runs:
           echo "manifest=$manifest"
           echo "version=$version"
           if [[ -n "$tag" ]]; then
-            echo "release-url=${LETSGO_SERVER}/${LETSGO_REPOSITORY}/releases/tag/${tag}"
+            echo "tag=$tag"
+          fi
+          if [[ -n "$tag" ]]; then
+            # A monorepo tag carries slashes, which stay; anything else a tag
+            # can hold is escaped.
+            escaped="$(jq -rn --arg t "$tag" '$t | split("/") | map(@uri) | join("/")')"
+            echo "release-url=${LETSGO_SERVER}/${LETSGO_REPOSITORY}/releases/tag/${escaped}"
           fi
         } >> "$GITHUB_OUTPUT"
+
+    - name: Upload plan
+      if: inputs.command == 'plan' && steps.run.outputs.plan-file != ''
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.plan-artifact }}
+        path: ${{ steps.run.outputs.plan-file }}
+        if-no-files-found: error
+        retention-days: 7
+
+    # Records which workflow built these bytes. Keyed by digest, so it covers
+    # the copies already attached to the release.
+    - name: Attest provenance
+      if: inputs.attest == 'true'
+      uses: actions/attest-build-provenance@v4
+      with:
+        # promote --work dist rebuilds into dist/build.
+        subject-path: |
+          ${{ inputs.working-directory }}/dist/*.tar.gz
+          ${{ inputs.working-directory }}/dist/*.zip
+          ${{ inputs.working-directory }}/dist/build/*.tar.gz
+          ${{ inputs.working-directory }}/dist/build/*.zip
